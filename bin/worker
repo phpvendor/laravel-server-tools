@@ -2,10 +2,10 @@
 # =====================================================
 # Laravel Worker Pro CLI
 # /usr/local/bin/worker
-# Version: 1.1.0 - Multi Control Panel Support
+# Version: 1.2.0 - Multi Control Panel Support
 # =====================================================
 # Features:
-#   worker create [user] [domain?] [queue?]
+#   worker create [user] [domain?] [queue?] [numprocs?]
 #   worker remove [user] [--force]
 #   worker list
 #   worker restart [user]
@@ -26,31 +26,26 @@ SUPERVISOR_CONF_DIR="/etc/supervisor/conf.d"
 
 # ---- Auto-detect control panel ----
 detect_control_panel() {
-  # CloudPanel detection (check for clpctl or common CloudPanel structure)
   if [ -d "/home" ] && { [ -f "/usr/local/bin/clpctl" ] || [ -d "/home/clp" ]; }; then
     echo "/home"
     return 0
   fi
-  
-  # FastPanel detection
+
   if [ -d "/var/www" ] && [ -f "/usr/local/fastpanel/version" ]; then
     echo "/var/www"
     return 0
   fi
-  
-  # Plesk detection
+
   if [ -d "/var/www/vhosts" ] && [ -f "/usr/local/psa/version" ]; then
     echo "/var/www/vhosts"
     return 0
   fi
-  
-  # cPanel detection
+
   if [ -d "/home" ] && [ -f "/usr/local/cpanel/version" ]; then
     echo "/home"
     return 0
   fi
-  
-  # Default fallback to /home if it has user directories with htdocs
+
   if [ -d "/home" ]; then
     for dir in /home/*/htdocs; do
       if [ -d "$dir" ]; then
@@ -59,8 +54,7 @@ detect_control_panel() {
       fi
     done
   fi
-  
-  # Final fallback
+
   echo "/var/www"
 }
 
@@ -68,19 +62,6 @@ BASE_WEB_ROOT=$(detect_control_panel)
 
 # ---- Helpers ----
 is_root() { [ "$(id -u)" -eq 0 ]; }
-
-run_sudo_cmd() {
-  if is_root; then
-    eval "$*"
-  else
-    if sudo -n true 2>/dev/null; then
-      sudo -n bash -c "$*"
-    else
-      echo -e "${RED}Error:${NC} This action requires sudo privileges but sudo -n is not allowed for your user."
-      return 1
-    fi
-  fi
-}
 
 write_conf() {
   local conf_path="$1"
@@ -127,34 +108,44 @@ supervisorctl_cmd() {
   fi
 }
 
+# ---- Worker target helper ----
+worker_target() {
+  local user="$1"
+  local conf="${SUPERVISOR_CONF_DIR}/${user}-worker.conf"
+  local procs=1
+  if [ -f "$conf" ]; then
+    procs=$(grep "^numprocs=" "$conf" | cut -d'=' -f2 | tr -d ' ')
+  fi
+  if [ "${procs:-1}" -gt 1 ]; then
+    echo "${user}-worker:*"
+  else
+    echo "${user}-worker"
+  fi
+}
+
 # ---- Domain / project detection ----
 find_laravel_sites_for_user() {
   local user="$1"
   local base
-  
-  # Try different path structures based on control panel
+
   local paths=(
-    "${BASE_WEB_ROOT}/${user}/data/www"           # FastPanel
-    "${BASE_WEB_ROOT}/${user}/htdocs"             # CloudPanel
-    "${BASE_WEB_ROOT}/${user}/httpdocs"           # Plesk
-    "${BASE_WEB_ROOT}/${user}/public_html"        # cPanel
-    "${BASE_WEB_ROOT}/${user}"                    # Generic
+    "${BASE_WEB_ROOT}/${user}/data/www"
+    "${BASE_WEB_ROOT}/${user}/htdocs"
+    "${BASE_WEB_ROOT}/${user}/httpdocs"
+    "${BASE_WEB_ROOT}/${user}/public_html"
+    "${BASE_WEB_ROOT}/${user}"
   )
-  
+
   for base in "${paths[@]}"; do
     if [ ! -d "$base" ]; then continue; fi
-    
-    # Check if base itself is a Laravel project
+
     if [ -f "${base}/artisan" ]; then
       echo "$(basename "$base")"
       continue
     fi
-    
-    # Search subdirectories for Laravel projects
+
     find "$base" -maxdepth 2 -mindepth 1 -name "artisan" -type f 2>/dev/null | while read -r artisan_path; do
-      # Get directory containing artisan
       local project_dir=$(dirname "$artisan_path")
-      # Get domain name (relative to base)
       local domain=$(echo "$project_dir" | sed "s|^${base}/||" | sed 's|/.*||')
       echo "$domain"
     done
@@ -170,15 +161,15 @@ auto_pick_domain_interactive() {
     echo "${sites[0]}"
     return 0
   else
-    echo -e "${YELLOW}Multiple Laravel projects found for user '$user':${NC}"
+    echo -e "${YELLOW}Multiple Laravel projects found for user '$user':${NC}" >&2
     local i=1
     for s in "${sites[@]}"; do
-      echo "  [$i] $s"
+      echo "  [$i] $s" >&2
       i=$((i+1))
     done
     read -p "Select project number: " sel
     if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#sites[@]}" ]; then
-      echo -e "${RED}Invalid selection.${NC}"
+      echo -e "${RED}Invalid selection.${NC}" >&2
       return 2
     fi
     echo "${sites[$((sel-1))]}"
@@ -188,19 +179,20 @@ auto_pick_domain_interactive() {
 
 # ---- Commands ----
 print_usage() {
-  echo -e "${CYAN}Laravel Worker Manager v1.1.0${NC}"
+  echo -e "${CYAN}Laravel Worker Manager v1.2.0${NC}"
   echo ""
   echo -e "${YELLOW}Usage:${NC}"
-  echo "  worker create [user] [domain?] [queue?]    Create a new worker"
-  echo "  worker remove [user] [--force]             Remove a worker (with confirmation)"
-  echo "  worker list                                 List all workers"
-  echo "  worker restart [user]                       Restart a worker"
-  echo "  worker status [user?]                       Show worker status"
-  echo "  worker logs [user] [out|err]                Tail worker logs"
+  echo "  worker create [user] [domain?] [queue?] [numprocs?]   Create a new worker"
+  echo "  worker remove [user] [--force]                         Remove a worker"
+  echo "  worker list                                             List all workers"
+  echo "  worker restart [user]                                   Restart a worker"
+  echo "  worker status [user?]                                   Show worker status"
+  echo "  worker logs [user] [out|err]                            Tail worker logs"
   echo ""
   echo -e "${YELLOW}Examples:${NC}"
   echo "  worker create john example.com"
   echo "  worker create john example.com emails"
+  echo "  worker create john example.com default 3"
   echo "  worker remove john --force"
   echo "  worker logs john out"
   echo ""
@@ -217,20 +209,6 @@ print_usage() {
   echo "  - Detected base path: ${BASE_WEB_ROOT}"
 }
 
-worker_target() {
-  local user="$1"
-  local conf="${SUPERVISOR_CONF_DIR}/${user}-worker.conf"
-  local procs=1
-  if [ -f "$conf" ]; then
-    procs=$(grep "^numprocs=" "$conf" | cut -d'=' -f2)
-  fi
-  if [ "${procs:-1}" -gt 1 ]; then
-    echo "${user}-worker:*"
-  else
-    echo "${user}-worker"
-  fi
-}
-
 cmd_create() {
   local user="$1"
   local domain="$2"
@@ -245,6 +223,7 @@ cmd_create() {
     echo -e "${CYAN}🌐 Auto-detected domain:${NC} ${domain}"
   fi
 
+  # Validate numprocs
   if [ -z "$numprocs" ] || ! [[ "$numprocs" =~ ^[0-9]+$ ]] || [ "$numprocs" -lt 1 ]; then
     numprocs=1
   fi
@@ -261,14 +240,14 @@ cmd_create() {
     "${BASE_WEB_ROOT}/${user}/public_html"
     "${BASE_WEB_ROOT}/${user}/httpdocs"
   )
-  
+
   for path in "${paths[@]}"; do
     if [ -f "${path}/artisan" ]; then
       project_dir="$path"
       break
     fi
   done
-  
+
   if [ -z "$project_dir" ]; then
     echo -e "${RED}❌ Laravel project not found for user '${user}' domain '${domain}'${NC}"
     echo -e "${CYAN}Searched paths:${NC}"
@@ -277,8 +256,6 @@ cmd_create() {
   fi
 
   local conf_file="${SUPERVISOR_CONF_DIR}/${user}-worker.conf"
-  
-  # Log files in project storage directory
   local log_out="${project_dir}/storage/logs/worker.out.log"
   local log_err="${project_dir}/storage/logs/worker.err.log"
 
@@ -305,7 +282,6 @@ cmd_create() {
   echo -e "${YELLOW}⚙️  Creating worker for user '${user}' (domain: ${domain})...${NC}"
   echo -e "${CYAN}   Project path:${NC} ${project_dir}"
 
-  # Prepare conf content
   read -r -d '' conf_content <<EOF || true
 [program:${user}-worker]
 process_name=%(program_name)s_%(process_num)02d
@@ -330,21 +306,21 @@ stopwaitsecs=60
 environment=APP_ENV="${app_env}",APP_DEBUG="${app_debug}"
 EOF
 
-  # Remove old if exists (force)
+  # Remove old conf if exists
   if is_root; then
     rm -f "$conf_file"
   else
     if sudo -n true 2>/dev/null; then
       sudo -n rm -f "$conf_file"
     else
-      echo -e "${RED}Error:${NC} cannot remove ${conf_file} (need sudo without password). Aborting." ; exit 1
+      echo -e "${RED}Error:${NC} cannot remove ${conf_file} (need sudo without password). Aborting."
+      exit 1
     fi
   fi
 
-  # Write conf
   write_conf "$conf_file" "$conf_content" || { echo -e "${RED}❌ Failed to write conf (permission?).${NC}"; exit 1; }
 
-  # Ensure storage/logs directory exists with proper ownership
+  # Ensure storage/logs directory exists
   echo -e "${CYAN}📁 Ensuring log directory exists...${NC}"
   if is_root; then
     mkdir -p "${project_dir}/storage/logs"
@@ -358,22 +334,26 @@ EOF
     fi
   fi
 
-  # Reload and start
+  # Reload supervisor and start worker
   reload_supervisor || { echo -e "${YELLOW}⚠️  Could not reload supervisor (insufficient privileges).${NC}"; }
-  supervisorctl_cmd start "${user}-worker" >/dev/null 2>&1 || supervisorctl_cmd restart "${user}-worker" >/dev/null 2>&1
+  local target
+  target=$(worker_target "$user")
+  supervisorctl_cmd start "$target" >/dev/null 2>&1 || supervisorctl_cmd restart "$target" >/dev/null 2>&1
 
-  # Create sudoers file for user to allow restart without password
+  # Create sudoers file
   local sudoers_file="/etc/sudoers.d/${user}-worker"
   echo -e "${CYAN}🔐 Creating sudoers entry for user '${user}'...${NC}"
-  
-  local sudoers_content="${user} ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart ${user}-worker, /usr/bin/supervisorctl status ${user}-worker, /usr/bin/supervisorctl stop ${user}-worker, /usr/bin/supervisorctl start ${user}-worker"
-  
+
   if is_root; then
-    echo "$sudoers_content" > "$sudoers_file"
+    cat > "$sudoers_file" <<EOF
+${user} ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart ${user}-worker, /usr/bin/supervisorctl restart ${user}-worker:*, /usr/bin/supervisorctl status ${user}-worker, /usr/bin/supervisorctl status ${user}-worker:*, /usr/bin/supervisorctl stop ${user}-worker, /usr/bin/supervisorctl stop ${user}-worker:*, /usr/bin/supervisorctl start ${user}-worker, /usr/bin/supervisorctl start ${user}-worker:*
+EOF
     chmod 0440 "$sudoers_file"
   else
     if sudo -n true 2>/dev/null; then
-      echo "$sudoers_content" | sudo -n tee "$sudoers_file" >/dev/null
+      sudo -n tee "$sudoers_file" >/dev/null <<EOF
+${user} ALL=(root) NOPASSWD: /usr/bin/supervisorctl restart ${user}-worker, /usr/bin/supervisorctl restart ${user}-worker:*, /usr/bin/supervisorctl status ${user}-worker, /usr/bin/supervisorctl status ${user}-worker:*, /usr/bin/supervisorctl stop ${user}-worker, /usr/bin/supervisorctl stop ${user}-worker:*, /usr/bin/supervisorctl start ${user}-worker, /usr/bin/supervisorctl start ${user}-worker:*
+EOF
       sudo -n chmod 0440 "$sudoers_file"
     else
       echo -e "${YELLOW}⚠️  Could not create sudoers file (need root access).${NC}"
@@ -381,14 +361,12 @@ EOF
   fi
 
   # Verify sudoers syntax
-  if command -v visudo >/dev/null 2>&1; then
-    if is_root; then
-      if ! visudo -c -f "$sudoers_file" >/dev/null 2>&1; then
-        echo -e "${RED}⚠️  Sudoers syntax error, removing file...${NC}"
-        rm -f "$sudoers_file"
-      else
-        echo -e "${GREEN}✅ Sudoers entry created successfully.${NC}"
-      fi
+  if command -v visudo >/dev/null 2>&1 && is_root; then
+    if ! visudo -c -f "$sudoers_file" >/dev/null 2>&1; then
+      echo -e "${RED}⚠️  Sudoers syntax error, removing file...${NC}"
+      rm -f "$sudoers_file"
+    else
+      echo -e "${GREEN}✅ Sudoers entry created successfully.${NC}"
     fi
   fi
 
@@ -396,6 +374,7 @@ EOF
   echo -e "${CYAN}   Domain:${NC} ${domain}"
   echo -e "${CYAN}   Driver:${NC} ${driver}"
   [ -n "$queue" ] && echo -e "${CYAN}   Queue:${NC} ${queue}"
+  echo -e "${CYAN}   Processes:${NC} ${numprocs}"
   echo -e "${CYAN}   Environment:${NC} ${app_env}"
   echo -e "${CYAN}   Logs:${NC} ${project_dir}/storage/logs/worker.{out,err}.log"
   echo ""
@@ -405,17 +384,15 @@ cmd_remove() {
   local user="$1"
   shift
   local force=false
-  
+
   if [ -z "$user" ]; then print_usage; exit 1; fi
-  
-  # Check for --force flag
+
   for arg in "$@"; do
     [ "$arg" = "--force" ] && force=true
   done
-  
+
   local conf_file="${SUPERVISOR_CONF_DIR}/${user}-worker.conf"
-  
-  # Confirmation prompt unless --force
+
   if [ "$force" = false ]; then
     echo -e "${YELLOW}⚠️  This will remove worker '${user}-worker'${NC}"
     read -p "Are you sure? (y/N): " confirm
@@ -424,12 +401,14 @@ cmd_remove() {
       exit 0
     fi
   fi
-  
+
   echo -e "${YELLOW}🗑️  Removing worker for ${user}...${NC}"
-  
+
   # Stop worker first
-  supervisorctl_cmd stop "${user}-worker" >/dev/null 2>&1 || true
-  
+  local target
+  target=$(worker_target "$user")
+  supervisorctl_cmd stop "$target" >/dev/null 2>&1 || true
+
   # Remove config file
   if is_root; then
     rm -f "$conf_file"
@@ -437,10 +416,11 @@ cmd_remove() {
     if sudo -n true 2>/dev/null; then
       sudo -n rm -f "$conf_file"
     else
-      echo -e "${RED}Error:${NC} cannot remove ${conf_file} (need sudo without password)." ; exit 1
+      echo -e "${RED}Error:${NC} cannot remove ${conf_file} (need sudo without password)."
+      exit 1
     fi
   fi
-  
+
   # Remove sudoers file
   local sudoers_file="/etc/sudoers.d/${user}-worker"
   if [ -f "$sudoers_file" ]; then
@@ -453,7 +433,7 @@ cmd_remove() {
       fi
     fi
   fi
-  
+
   reload_supervisor || echo -e "${YELLOW}⚠️  Supervisor reload skipped.${NC}"
   echo -e "${GREEN}✅ Worker stopped and removed.${NC}"
   echo -e "${CYAN}Note:${NC} Log files remain in project storage/logs directory"
@@ -461,7 +441,8 @@ cmd_remove() {
 
 cmd_list() {
   if ! supervisorctl_cmd status >/dev/null 2>&1; then
-    echo -e "${RED}Error:${NC} cannot run supervisorctl (insufficient privileges)." ; exit 1
+    echo -e "${RED}Error:${NC} cannot run supervisorctl (insufficient privileges)."
+    exit 1
   fi
   echo -e "${CYAN}📋 Workers (supervisorctl):${NC}"
   supervisorctl_cmd status | grep -- "-worker" || echo "No workers found."
@@ -470,10 +451,10 @@ cmd_list() {
 cmd_restart() {
   local user="$1"
   if [ -z "$user" ]; then print_usage; exit 1; fi
-  
+
   local target
   target=$(worker_target "$user")
-  
+
   echo -e "${YELLOW}🔄 Restarting worker for ${user}...${NC}"
   supervisorctl_cmd restart "$target" >/dev/null 2>&1 && \
     echo -e "${GREEN}✅ Worker '${target}' restarted.${NC}" || \
@@ -483,15 +464,23 @@ cmd_restart() {
 cmd_status() {
   local user="$1"
   if ! supervisorctl_cmd status >/dev/null 2>&1; then
-    echo -e "${RED}Error:${NC} cannot run supervisorctl (insufficient privileges)." ; exit 1
+    echo -e "${RED}Error:${NC} cannot run supervisorctl (insufficient privileges)."
+    exit 1
   fi
 
+  local lines
   if [ -n "$user" ]; then
-    supervisorctl_cmd status | grep -E "^${user}-worker\b" >/dev/null 2>&1 || { echo -e "${RED}No worker for ${user}.${NC}"; return; }
-    lines=$(supervisorctl_cmd status | grep -E "^${user}-worker\b")
+    lines=$(supervisorctl_cmd status | grep -E "^${user}-worker" || true)
+    if [ -z "$lines" ]; then
+      echo -e "${RED}No worker for ${user}.${NC}"
+      return
+    fi
   else
     lines=$(supervisorctl_cmd status | grep -- "-worker" || true)
-    if [ -z "$lines" ]; then echo "No workers found."; return; fi
+    if [ -z "$lines" ]; then
+      echo "No workers found."
+      return
+    fi
   fi
 
   while IFS= read -r line; do
@@ -509,18 +498,21 @@ cmd_logs() {
   local user="$1"
   local which="$2"
   if [ -z "$user" ]; then print_usage; exit 1; fi
+
   if [ -z "$which" ]; then
     echo -e "${YELLOW}Choose log: (out/err)${NC}"
     read -p "Which log [out]: " which
     which=${which:-out}
   fi
+
   if [[ "$which" != "out" && "$which" != "err" ]]; then
-    echo -e "${RED}Invalid option. Choose 'out' or 'err'.${NC}"; exit 1
+    echo -e "${RED}Invalid option. Choose 'out' or 'err'.${NC}"
+    exit 1
   fi
 
-  local domain=$(auto_pick_domain_interactive "$user") || { echo -e "${RED}No domain found for user ${user}.${NC}"; exit 1; }
+  local domain
+  domain=$(auto_pick_domain_interactive "$user") || { echo -e "${RED}No domain found for user ${user}.${NC}"; exit 1; }
 
-  # Try different path structures
   local project_dir=""
   local paths=(
     "${BASE_WEB_ROOT}/${user}/data/www/${domain}"
@@ -532,18 +524,19 @@ cmd_logs() {
     "${BASE_WEB_ROOT}/${user}/public_html"
     "${BASE_WEB_ROOT}/${user}/httpdocs"
   )
-  
+
   for path in "${paths[@]}"; do
     if [ -f "${path}/artisan" ]; then
       project_dir="$path"
       break
     fi
   done
-  
+
   if [ -z "$project_dir" ]; then
-    echo -e "${RED}❌ Project directory not found for user ${user}.${NC}"; exit 1
+    echo -e "${RED}❌ Project directory not found for user ${user}.${NC}"
+    exit 1
   fi
-  
+
   local file
   if [ "$which" == "out" ]; then
     file="${project_dir}/storage/logs/worker.out.log"
@@ -566,14 +559,15 @@ cmd_logs() {
         sudo -n chown "${user}:${user}" "$file" 2>/dev/null || true
         sudo -n chmod 644 "$file" 2>/dev/null || true
       else
-        echo -e "${RED}Cannot create log file (need sudo).${NC}"; exit 1
+        echo -e "${RED}Cannot create log file (need sudo).${NC}"
+        exit 1
       fi
     fi
   fi
 
   echo -e "${CYAN}📄 Tailing ${file}${NC}"
   echo -e "${YELLOW}(Press Ctrl+C to stop)${NC}\n"
-  
+
   if [ -r "$file" ]; then
     tail -f "$file"
   else
@@ -595,12 +589,12 @@ cmd="$1"
 shift || true
 
 case "$cmd" in
-  create) cmd_create "$@";;
-  remove) cmd_remove "$@";;
-  list) cmd_list;;
-  restart) cmd_restart "$@";;
-  status) cmd_status "$@";;
-  logs) cmd_logs "$@";;
-  --help|-h|help) print_usage;;
-  *) print_usage;;
+  create)  cmd_create "$@" ;;
+  remove)  cmd_remove "$@" ;;
+  list)    cmd_list ;;
+  restart) cmd_restart "$@" ;;
+  status)  cmd_status "$@" ;;
+  logs)    cmd_logs "$@" ;;
+  --help|-h|help) print_usage ;;
+  *) print_usage ;;
 esac
