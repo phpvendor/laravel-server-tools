@@ -216,6 +216,8 @@ cmd_create() {
   local numprocs="$4"
   local group
 
+  id "$user" >/dev/null 2>&1 || { echo -e "${RED}User '${user}' does not exist.${NC}"; exit 1; }
+
   if [ -z "$user" ]; then print_usage; exit 1; fi
 
   group=$(id -gn "$user" 2>/dev/null || echo "$user")
