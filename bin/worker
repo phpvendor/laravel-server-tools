@@ -31,7 +31,7 @@ detect_control_panel() {
     return 0
   fi
 
-  if [ -d "/var/www" ] && [ -f "/usr/local/fastpanel/version" ]; then
+  if [ -d "/var/www" ] && { [ -f "/usr/local/fastpanel/version" ] || [ -d "/usr/local/fastpanel2" ]; }; then
     echo "/var/www"
     return 0
   fi
@@ -214,8 +214,11 @@ cmd_create() {
   local domain="$2"
   local queue="$3"
   local numprocs="$4"
+  local group
 
   if [ -z "$user" ]; then print_usage; exit 1; fi
+
+  group=$(id -gn "$user" 2>/dev/null || echo "$user")
 
   # Detect domain if not provided
   if [ -z "$domain" ]; then
@@ -294,6 +297,7 @@ autorestart=true
 stopasgroup=true
 killasgroup=true
 user=${user}
+group=${group}
 numprocs=${numprocs}
 redirect_stderr=true
 stdout_logfile=${log_out}
@@ -324,13 +328,17 @@ EOF
   echo -e "${CYAN}📁 Ensuring log directory exists...${NC}"
   if is_root; then
     mkdir -p "${project_dir}/storage/logs"
-    chown -R "${user}":"${user}" "${project_dir}/storage/logs" 2>/dev/null || true
+    touch "${log_out}" "${log_err}"
+    chown "${user}":"${group}" "${project_dir}/storage/logs" "${log_out}" "${log_err}" 2>/dev/null || true
     chmod 755 "${project_dir}/storage/logs" 2>/dev/null || true
+    chmod 644 "${log_out}" "${log_err}" 2>/dev/null || true
   else
     if sudo -n true 2>/dev/null; then
       sudo -n mkdir -p "${project_dir}/storage/logs"
-      sudo -n chown -R "${user}":"${user}" "${project_dir}/storage/logs" 2>/dev/null || true
+      sudo -n touch "${log_out}" "${log_err}"
+      sudo -n chown "${user}":"${group}" "${project_dir}/storage/logs" "${log_out}" "${log_err}" 2>/dev/null || true
       sudo -n chmod 755 "${project_dir}/storage/logs" 2>/dev/null || true
+      sudo -n chmod 644 "${log_out}" "${log_err}" 2>/dev/null || true
     fi
   fi
 
