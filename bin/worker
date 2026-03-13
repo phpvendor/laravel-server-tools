@@ -217,10 +217,25 @@ print_usage() {
   echo "  - Detected base path: ${BASE_WEB_ROOT}"
 }
 
+worker_target() {
+  local user="$1"
+  local conf="${SUPERVISOR_CONF_DIR}/${user}-worker.conf"
+  local procs=1
+  if [ -f "$conf" ]; then
+    procs=$(grep "^numprocs=" "$conf" | cut -d'=' -f2)
+  fi
+  if [ "${procs:-1}" -gt 1 ]; then
+    echo "${user}-worker:*"
+  else
+    echo "${user}-worker"
+  fi
+}
+
 cmd_create() {
   local user="$1"
   local domain="$2"
   local queue="$3"
+  local numprocs="$4"
 
   if [ -z "$user" ]; then print_usage; exit 1; fi
 
@@ -228,6 +243,10 @@ cmd_create() {
   if [ -z "$domain" ]; then
     domain=$(auto_pick_domain_interactive "$user") || { echo -e "${RED}No domain auto-detected for user ${user}.${NC}"; exit 1; }
     echo -e "${CYAN}🌐 Auto-detected domain:${NC} ${domain}"
+  fi
+
+  if [ -z "$numprocs" ] || ! [[ "$numprocs" =~ ^[0-9]+$ ]] || [ "$numprocs" -lt 1 ]; then
+    numprocs=1
   fi
 
   # Try different path structures
@@ -289,6 +308,7 @@ cmd_create() {
   # Prepare conf content
   read -r -d '' conf_content <<EOF || true
 [program:${user}-worker]
+process_name=%(program_name)s_%(process_num)02d
 command=${cmd}
 directory=${project_dir}
 autostart=true
@@ -298,7 +318,7 @@ autorestart=true
 stopasgroup=true
 killasgroup=true
 user=${user}
-numprocs=1
+numprocs=${numprocs}
 redirect_stderr=true
 stdout_logfile=${log_out}
 stderr_logfile=${log_err}
@@ -450,9 +470,13 @@ cmd_list() {
 cmd_restart() {
   local user="$1"
   if [ -z "$user" ]; then print_usage; exit 1; fi
+  
+  local target
+  target=$(worker_target "$user")
+  
   echo -e "${YELLOW}🔄 Restarting worker for ${user}...${NC}"
-  supervisorctl_cmd restart "${user}-worker" >/dev/null 2>&1 && \
-    echo -e "${GREEN}✅ Worker restarted.${NC}" || \
+  supervisorctl_cmd restart "$target" >/dev/null 2>&1 && \
+    echo -e "${GREEN}✅ Worker '${target}' restarted.${NC}" || \
     echo -e "${RED}⚠️  Worker not found or failed to restart.${NC}"
 }
 
